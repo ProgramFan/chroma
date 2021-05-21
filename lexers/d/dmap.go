@@ -48,7 +48,7 @@ func dmapRules() Rules {
 			{Words(`\b`, `\b`, "type", "dbview", "file", "dbequiv", "dbdelete"), KeywordReserved, nil},
 		},
 		"literals": {
-			{`[+-]?\d+\.(\d+)?([de]\d+)?`, LiteralNumberFloat, nil},
+			{`[+-]?\d+\.(\d+)?([de][+-]?\d+)?`, LiteralNumberFloat, nil},
 			{`[+-]?\d+`, LiteralNumberInteger, nil},
 			{`'.+?'`, LiteralString, nil},
 		},
