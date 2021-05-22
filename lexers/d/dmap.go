@@ -28,7 +28,7 @@ func dmapRules() Rules {
 		"root": {
 			Include("whitespace"),
 			Include("keywords"),
-			Include("literials"),
+			Include("literals"),
 			{`[a-z0-9]+`, Name, nil},
 			Include("operators"),
 			{`[(),/]`, Punctuation, nil},
