@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/pprof"
 	"sort"
@@ -16,14 +18,14 @@ import (
 	"strings"
 
 	"github.com/alecthomas/kong"
-	"github.com/mattn/go-colorable"
-	"github.com/mattn/go-isatty"
+	colorable "github.com/mattn/go-colorable"
+	isatty "github.com/mattn/go-isatty"
 
-	"github.com/alecthomas/chroma"
-	"github.com/alecthomas/chroma/formatters"
-	"github.com/alecthomas/chroma/formatters/html"
-	"github.com/alecthomas/chroma/lexers"
-	"github.com/alecthomas/chroma/styles"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/formatters/html"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 )
 
 var (
@@ -46,29 +48,30 @@ command, for Go.
 		Check      bool             `help:"Do not format, check for tokenisation errors instead."`
 		Filename   string           `help:"Filename to use for selecting a lexer when reading from stdin."`
 		Fail       bool             `help:"Exit silently with status 1 if no specific lexer was found."`
+		XML        string           `hidden:"" help:"Generate XML lexer definitions." type:"existingdir" placeholder:"DIR"`
 
-		Lexer     string `help:"Lexer to use when formatting." default:"autodetect" short:"l" enum:"${lexers}"`
-		Style     string `help:"Style to use for formatting." default:"swapoff" short:"s" enum:"${styles}"`
-		Formatter string `help:"Formatter to use." default:"terminal" short:"f" enum:"${formatters}"`
+		Lexer string `group:"select" help:"Lexer to use when formatting or path to an XML file to load." default:"autodetect" short:"l"`
+		Style string `group:"select" help:"Style to use for formatting or path to an XML file to load." default:"swapoff" short:"s"`
 
-		JSON bool `help:"Output JSON representation of tokens."`
+		Formatter string `group:"format" help:"Formatter to use." default:"terminal" short:"f" enum:"${formatters}"`
+		JSON      bool   `group:"format" help:"Convenience flag to use JSON formatter."`
+		HTML      bool   `group:"format" help:"Convenience flag to use HTML formatter."`
+		SVG       bool   `group:"format" help:"Convenience flag to use SVG formatter."`
 
-		HTML                      bool   `help:"Enable HTML mode (equivalent to '--formatter html')."`
-		HTMLPrefix                string `help:"HTML CSS class prefix." placeholder:"PREFIX"`
-		HTMLStyles                bool   `help:"Output HTML CSS styles."`
-		HTMLAllStyles             bool   `help:"Output all HTML CSS styles, including redundant ones."`
-		HTMLOnly                  bool   `help:"Output HTML fragment."`
-		HTMLInlineStyles          bool   `help:"Output HTML with inline styles (no classes)."`
-		HTMLTabWidth              int    `help:"Set the HTML tab width." default:"8"`
-		HTMLLines                 bool   `help:"Include line numbers in output."`
-		HTMLLinesTable            bool   `help:"Split line numbers and code in a HTML table"`
-		HTMLLinesStyle            string `help:"Style for line numbers."`
-		HTMLHighlight             string `help:"Highlight these lines." placeholder:"N[:M][,...]"`
-		HTMLHighlightStyle        string `help:"Style used for highlighting lines."`
-		HTMLBaseLine              int    `help:"Base line number." default:"1"`
-		HTMLPreventSurroundingPre bool   `help:"Prevent the surrounding pre tag."`
-
-		SVG bool `help:"Output SVG representation of tokens."`
+		HTMLPrefix                string `group:"html" help:"HTML CSS class prefix." placeholder:"PREFIX"`
+		HTMLStyles                bool   `group:"html" help:"Output HTML CSS styles."`
+		HTMLAllStyles             bool   `group:"html" help:"Output all HTML CSS styles, including redundant ones."`
+		HTMLOnly                  bool   `group:"html" help:"Output HTML fragment."`
+		HTMLInlineStyles          bool   `group:"html" help:"Output HTML with inline styles (no classes)."`
+		HTMLTabWidth              int    `group:"html" help:"Set the HTML tab width." default:"8"`
+		HTMLLines                 bool   `group:"html" help:"Include line numbers in output."`
+		HTMLLinesTable            bool   `group:"html" help:"Split line numbers and code in a HTML table"`
+		HTMLLinesStyle            string `group:"html" help:"Style for line numbers."`
+		HTMLHighlight             string `group:"html" help:"Highlight these lines." placeholder:"N[:M][,...]"`
+		HTMLHighlightStyle        string `group:"html" help:"Style used for highlighting lines."`
+		HTMLBaseLine              int    `group:"html" help:"Base line number." default:"1"`
+		HTMLPreventSurroundingPre bool   `group:"html" help:"Prevent the surrounding pre tag."`
+		HTMLLinkableLines         bool   `group:"html" help:"Make the line numbers linkable and be a link to themselves."`
 
 		Files []string `arg:"" optional:"" help:"Files to highlight." type:"existingfile"`
 	}
@@ -84,17 +87,22 @@ type nopFlushableWriter struct{ io.Writer }
 func (n *nopFlushableWriter) Flush() error { return nil }
 
 // prepareLenient prepares contents and lexer for input, using fallback lexer if no specific one is available for it.
-func prepareLenient(ctx *kong.Context, r io.Reader, filename string) (string, chroma.Lexer) {
+func prepareLenient(r io.Reader, filename string) (string, chroma.Lexer, error) {
 	data, err := ioutil.ReadAll(r)
-	ctx.FatalIfErrorf(err)
+	if err != nil {
+		return "", nil, err
+	}
 
 	contents := string(data)
-	lexer := selexer(filename, contents)
+	lexer, err := selexer(filename, contents)
+	if err != nil {
+		return "", nil, err
+	}
 	if lexer == nil {
 		lexer = lexers.Fallback
 	}
 
-	return contents, lexer
+	return contents, lexer, nil
 }
 
 // prepareSpecific prepares contents and lexer for input, exiting if there is no specific lexer available for it.
@@ -106,7 +114,10 @@ func prepareSpecific(ctx *kong.Context, r io.Reader, filename string, peekSize, 
 		ctx.FatalIfErrorf(err)
 	}
 
-	lexer := selexer(filename, string(data[:n]))
+	lexer, err := selexer(filename, string(data[:n]))
+	if err != nil {
+		ctx.FatalIfErrorf(err)
+	}
 	if lexer == nil {
 		ctx.Exit(1)
 	}
@@ -137,7 +148,16 @@ func main() {
 		"lexers":     "autodetect," + strings.Join(lexers.Names(true), ","),
 		"styles":     strings.Join(styles.Names(), ","),
 		"formatters": strings.Join(formatters.Names(), ","),
+	}, kong.Groups{
+		"format": "Output format:",
+		"select": "Select lexer and style:",
+		"html":   "HTML formatter options:",
 	})
+	if cli.XML != "" {
+		err := dumpXMLLexerDefinitions(cli.XML)
+		ctx.FatalIfErrorf(err)
+		return
+	}
 	if cli.List {
 		listAll()
 		return
@@ -183,7 +203,9 @@ func main() {
 	}
 
 	// Retrieve user-specified style, clone it, and add some overrides.
-	builder := styles.Get(cli.Style).Builder()
+	selectedStyle, err := selectStyle()
+	ctx.FatalIfErrorf(err)
+	builder := selectedStyle.Builder()
 	if cli.HTMLHighlightStyle != "" {
 		builder.Add(chroma.LineHighlight, cli.HTMLHighlightStyle)
 	}
@@ -193,28 +215,26 @@ func main() {
 	style, err := builder.Build()
 	ctx.FatalIfErrorf(err)
 
+	if cli.Formatter == "html" {
+		configureHTMLFormatter(ctx)
+	}
+
 	// Dump styles.
 	if cli.HTMLStyles {
-		options := []html.Option{html.WithClasses(true)}
-		if cli.HTMLAllStyles {
-			options = append(options, html.WithAllClasses(true))
-		}
-		formatter := html.New(options...)
+		formatter := formatters.Get("html").(*html.Formatter)
 		err = formatter.WriteCSS(w, style)
 		ctx.FatalIfErrorf(err)
 		return
 	}
 
-	if cli.Formatter == "html" {
-		configureHTMLFormatter(ctx)
-	}
 	if len(cli.Files) == 0 {
 		var contents string
 		var lexer chroma.Lexer
 		if cli.Fail {
 			contents, lexer = prepareSpecific(ctx, os.Stdin, cli.Filename, 1024, -1)
 		} else {
-			contents, lexer = prepareLenient(ctx, os.Stdin, cli.Filename)
+			contents, lexer, err = prepareLenient(os.Stdin, cli.Filename)
+			ctx.FatalIfErrorf(err)
 		}
 		format(ctx, w, style, lex(ctx, lexer, contents))
 	} else {
@@ -223,7 +243,8 @@ func main() {
 			ctx.FatalIfErrorf(err)
 
 			if cli.Check {
-				contents, lexer := prepareLenient(ctx, file, filename)
+				contents, lexer, err := prepareLenient(file, filename)
+				ctx.FatalIfErrorf(err)
 				check(filename, lex(ctx, lexer, contents))
 			} else {
 				var contents string
@@ -233,7 +254,8 @@ func main() {
 					ctx.FatalIfErrorf(err)
 					contents, lexer = prepareSpecific(ctx, file, filename, 1024, int(fi.Size()))
 				} else {
-					contents, lexer = prepareLenient(ctx, file, filename)
+					contents, lexer, err = prepareLenient(file, filename)
+					ctx.FatalIfErrorf(err)
 				}
 				format(ctx, w, style, lex(ctx, lexer, contents))
 			}
@@ -242,6 +264,19 @@ func main() {
 			ctx.FatalIfErrorf(err)
 		}
 	}
+}
+
+func selectStyle() (*chroma.Style, error) {
+	style, ok := styles.Registry[cli.Style]
+	if ok {
+		return style, nil
+	}
+	r, err := os.Open(cli.Style)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return chroma.NewXMLStyle(r)
 }
 
 func configureHTMLFormatter(ctx *kong.Context) {
@@ -255,6 +290,7 @@ func configureHTMLFormatter(ctx *kong.Context) {
 		html.WithLineNumbers(cli.HTMLLines),
 		html.LineNumbersInTable(cli.HTMLLinesTable),
 		html.PreventSurroundingPre(cli.HTMLPreventSurroundingPre),
+		html.WithLinkableLineNumbers(cli.HTMLLinkableLines, "L"),
 	}
 	if len(cli.HTMLHighlight) > 0 {
 		ranges := [][2]int{}
@@ -279,8 +315,8 @@ func configureHTMLFormatter(ctx *kong.Context) {
 
 func listAll() {
 	fmt.Println("lexers:")
-	sort.Sort(lexers.Registry.Lexers)
-	for _, l := range lexers.Registry.Lexers {
+	sort.Sort(lexers.GlobalLexerRegistry.Lexers)
+	for _, l := range lexers.GlobalLexerRegistry.Lexers {
 		config := l.Config()
 		fmt.Printf("  %s\n", config.Name)
 		filenames := []string{}
@@ -319,17 +355,34 @@ func lex(ctx *kong.Context, lexer chroma.Lexer, contents string) chroma.Iterator
 	return it
 }
 
-func selexer(path, contents string) (lexer chroma.Lexer) {
-	if cli.Lexer != "autodetect" {
-		return lexers.Get(cli.Lexer)
-	}
-	if path != "" {
-		lexer := lexers.Match(path)
-		if lexer != nil {
-			return lexer
+func selexer(path, contents string) (lexer chroma.Lexer, err error) {
+	if cli.Lexer == "autodetect" {
+		if path != "" {
+			lexer := lexers.Match(path)
+			if lexer != nil {
+				return lexer, nil
+			}
 		}
+		return lexers.Analyse(contents), nil
 	}
-	return lexers.Analyse(contents)
+
+	if _, err := os.Stat(cli.Lexer); err == nil {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		absPath, err := filepath.Abs(cli.Lexer)
+		if err != nil {
+			return nil, err
+		}
+		path, err := filepath.Rel(cwd, absPath)
+		if err != nil {
+			return nil, err
+		}
+		return chroma.NewXMLLexer(os.DirFS("."), path)
+	}
+
+	return lexers.Get(cli.Lexer), nil
 }
 
 func format(ctx *kong.Context, w io.Writer, style *chroma.Style, it chroma.Iterator) {
@@ -351,4 +404,35 @@ func check(filename string, it chroma.Iterator) {
 			}
 		}
 	}
+}
+
+var nameCleanRe = regexp.MustCompile(`[^A-Za-z0-9_#+-]`)
+
+func dumpXMLLexerDefinitions(dir string) error {
+	for _, name := range lexers.Names(false) {
+		lex := lexers.Get(name)
+		if rlex, ok := lex.(*chroma.RegexLexer); ok {
+			data, err := chroma.Marshal(rlex)
+			if err != nil {
+				if errors.Is(err, chroma.ErrNotSerialisable) {
+					fmt.Fprintf(os.Stderr, "warning: %q: %s\n", name, err)
+					continue
+				}
+				return err
+			}
+			name := strings.ToLower(nameCleanRe.ReplaceAllString(lex.Config().Name, "_"))
+			filename := filepath.Join(dir, name) + ".xml"
+			// fmt.Println(name)
+			_, err = os.Stat(filename)
+			if err == nil {
+				fmt.Fprintf(os.Stderr, "warning: %s already exists\n", filename)
+				continue
+			}
+			err = os.WriteFile(filename, data, 0600)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

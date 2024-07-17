@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"html/template"
 	"log"
+	"mime"
 	"net/http"
 	"sort"
 	"strings"
@@ -15,10 +16,10 @@ import (
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 
-	"github.com/alecthomas/chroma"
-	"github.com/alecthomas/chroma/formatters/html"
-	"github.com/alecthomas/chroma/lexers"
-	"github.com/alecthomas/chroma/styles"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters/html"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 )
 
 var (
@@ -29,7 +30,29 @@ var (
 	//go:embed static
 	staticFiles embed.FS
 
-	htmlTemplate = template.Must(template.New("html").Parse(indexTemplate))
+	htmlTemplate = template.Must(template.New("html").
+			Funcs(template.FuncMap{
+			"JS": func(filename string) template.JS {
+				if version == "devel" {
+					return template.JS(`import "./static/` + filename + "\";\n")
+				}
+				content, err := staticFiles.ReadFile("static/" + strings.TrimSuffix(filename, ".js") + ".min.js")
+				if err != nil {
+					panic(err)
+				}
+				return template.JS(content)
+			},
+			"CSS": func(filename string) template.CSS {
+				if version == "devel" {
+					return template.CSS(`@import url("./static/` + filename + "\");")
+				}
+				content, err := staticFiles.ReadFile("static/" + strings.TrimSuffix(filename, ".css") + ".min.css")
+				if err != nil {
+					panic(err)
+				}
+				return template.CSS(content)
+			},
+		}).Parse(indexTemplate))
 )
 
 type context struct {
@@ -137,7 +160,7 @@ func newContext(r *http.Request) context {
 	if ctx.SelectedStyle == "" {
 		ctx.SelectedStyle = "monokailight"
 	}
-	for _, lexer := range lexers.Registry.Lexers {
+	for _, lexer := range lexers.GlobalLexerRegistry.Lexers {
 		ctx.Languages = append(ctx.Languages, lexer.Config().Name)
 	}
 	sort.Strings(ctx.Languages)
@@ -158,6 +181,8 @@ func main() {
 	ctx := kong.Parse(&cli, kong.Configuration(konghcl.Loader), kong.Vars{"version": version})
 
 	log.Printf("Starting chromad %s on http://%s\n", version, cli.Bind)
+
+	mime.AddExtensionType(".js", "application/javascript")
 
 	router := mux.NewRouter()
 	router.Handle("/", http.HandlerFunc(index)).Methods("GET")

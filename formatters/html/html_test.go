@@ -3,15 +3,16 @@ package html
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"regexp"
 	"strings"
 	"testing"
 
-	"github.com/alecthomas/assert"
+	assert "github.com/alecthomas/assert/v2"
 
-	"github.com/alecthomas/chroma"
-	"github.com/alecthomas/chroma/lexers"
-	"github.com/alecthomas/chroma/styles"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 )
 
 func TestCompressStyle(t *testing.T) {
@@ -27,7 +28,7 @@ func BenchmarkHTMLFormatter(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		it, err := lexers.Get("go").Tokenise(nil, "package main\nfunc main()\n{\nprintln(`hello world`)\n}\n")
 		assert.NoError(b, err)
-		err = formatter.Format(ioutil.Discard, styles.Fallback, it)
+		err = formatter.Format(io.Discard, styles.Fallback, it)
 		assert.NoError(b, err)
 	}
 }
@@ -108,8 +109,47 @@ func TestTableLineNumberNewlines(t *testing.T) {
 </span>`)
 }
 
-func TestLinkeableLineNumbers(t *testing.T) {
-	f := New(WithClasses(true), WithLineNumbers(true), LinkableLineNumbers(true, "line"))
+func TestTabWidthStyle(t *testing.T) {
+	f := New(TabWidth(4), WithClasses(false))
+	it, err := lexers.Get("bash").Tokenise(nil, "echo FOO")
+	assert.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = f.Format(&buf, styles.Fallback, it)
+	assert.NoError(t, err)
+
+	assert.True(t, regexp.MustCompile(`<pre.*style=".*background-color:[^;]+;-moz-tab-size:4;-o-tab-size:4;tab-size:4;[^"]*".+`).MatchString(buf.String()))
+}
+
+func TestWithCustomCSS(t *testing.T) {
+	f := New(WithClasses(false), WithCustomCSS(map[chroma.TokenType]string{chroma.Line: `display: inline;`}))
+	it, err := lexers.Get("bash").Tokenise(nil, "echo FOO")
+	assert.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = f.Format(&buf, styles.Fallback, it)
+	assert.NoError(t, err)
+
+	assert.True(t, regexp.MustCompile(`<span style="display:flex;display:inline;"><span><span style=".*">echo</span> FOO</span></span>`).MatchString(buf.String()))
+}
+
+func TestWithCustomCSSStyleInheritance(t *testing.T) {
+	f := New(WithClasses(false), WithCustomCSS(map[chroma.TokenType]string{
+		chroma.String:              `background: blue;`,
+		chroma.LiteralStringDouble: `color: tomato;`,
+	}))
+	it, err := lexers.Get("bash").Tokenise(nil, `echo "FOO"`)
+	assert.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = f.Format(&buf, styles.Fallback, it)
+	assert.NoError(t, err)
+
+	assert.True(t, regexp.MustCompile(` <span style=".*;background:blue;color:tomato;">&#34;FOO&#34;</span>`).MatchString(buf.String()))
+}
+
+func TestWrapLongLines(t *testing.T) {
+	f := New(WithClasses(false), WrapLongLines(true))
 	it, err := lexers.Get("go").Tokenise(nil, "package main\nfunc main()\n{\nprintln(\"hello world\")\n}\n")
 	assert.NoError(t, err)
 
@@ -117,12 +157,62 @@ func TestLinkeableLineNumbers(t *testing.T) {
 	err = f.Format(&buf, styles.Fallback, it)
 	assert.NoError(t, err)
 
-	assert.Contains(t, buf.String(), `id="line1"><a style="outline: none; text-decoration:none; color:inherit" href="#line1">1</a>`)
-	assert.Contains(t, buf.String(), `id="line5"><a style="outline: none; text-decoration:none; color:inherit" href="#line5">5</a>`)
+	assert.True(t, regexp.MustCompile(`<pre.*style=".*white-space:pre-wrap;word-break:break-word;`).MatchString(buf.String()))
+}
+
+func TestHighlightLines(t *testing.T) {
+	f := New(WithClasses(true), HighlightLines([][2]int{{4, 5}}))
+	it, err := lexers.Get("go").Tokenise(nil, "package main\nfunc main()\n{\nprintln(\"hello world\")\n}\n")
+	assert.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = f.Format(&buf, styles.Fallback, it)
+	assert.NoError(t, err)
+
+	assert.Contains(t, buf.String(), `<span class="line hl"><span class="cl">`)
+}
+
+func TestLineNumbers(t *testing.T) {
+	f := New(WithClasses(true), WithLineNumbers(true))
+	it, err := lexers.Get("bash").Tokenise(nil, "echo FOO")
+	assert.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = f.Format(&buf, styles.Fallback, it)
+	assert.NoError(t, err)
+
+	assert.Contains(t, buf.String(), `<span class="line"><span class="ln">1</span><span class="cl"><span class="nb">echo</span> FOO</span></span>`)
+}
+
+func TestPreWrapper(t *testing.T) {
+	f := New(Standalone(true), WithClasses(true))
+	it, err := lexers.Get("bash").Tokenise(nil, "echo FOO")
+	assert.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = f.Format(&buf, styles.Fallback, it)
+	assert.NoError(t, err)
+
+	assert.True(t, regexp.MustCompile("<body class=\"bg\">\n<pre.*class=\"chroma\"><code><span class=\"line\"><span class=\"cl\"><span class=\"nb\">echo</span> FOO</span></span></code></pre>\n</body>\n</html>").MatchString(buf.String()))
+	assert.True(t, regexp.MustCompile(`\.bg { .+ }`).MatchString(buf.String()))
+	assert.True(t, regexp.MustCompile(`\.chroma { .+ }`).MatchString(buf.String()))
+}
+
+func TestLinkeableLineNumbers(t *testing.T) {
+	f := New(WithClasses(true), WithLineNumbers(true), WithLinkableLineNumbers(true, "line"), WithClasses(false))
+	it, err := lexers.Get("go").Tokenise(nil, "package main\nfunc main()\n{\nprintln(\"hello world\")\n}\n")
+	assert.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = f.Format(&buf, styles.Fallback, it)
+	assert.NoError(t, err)
+
+	assert.Contains(t, buf.String(), `id="line1"><a style="outline:none;text-decoration:none;color:inherit" href="#line1">1</a>`)
+	assert.Contains(t, buf.String(), `id="line5"><a style="outline:none;text-decoration:none;color:inherit" href="#line5">5</a>`)
 }
 
 func TestTableLinkeableLineNumbers(t *testing.T) {
-	f := New(WithClasses(true), WithLineNumbers(true), LineNumbersInTable(true), LinkableLineNumbers(true, "line"))
+	f := New(Standalone(true), WithClasses(true), WithLineNumbers(true), LineNumbersInTable(true), WithLinkableLineNumbers(true, "line"))
 	it, err := lexers.Get("go").Tokenise(nil, "package main\nfunc main()\n{\nprintln(`hello world`)\n}\n")
 	assert.NoError(t, err)
 
@@ -130,8 +220,9 @@ func TestTableLinkeableLineNumbers(t *testing.T) {
 	err = f.Format(&buf, styles.Fallback, it)
 	assert.NoError(t, err)
 
-	assert.Contains(t, buf.String(), `id="line1"><a style="outline: none; text-decoration:none; color:inherit" href="#line1">1</a>`)
-	assert.Contains(t, buf.String(), `id="line5"><a style="outline: none; text-decoration:none; color:inherit" href="#line5">5</a>`)
+	assert.Contains(t, buf.String(), `id="line1"><a class="lnlinks" href="#line1">1</a>`)
+	assert.Contains(t, buf.String(), `id="line5"><a class="lnlinks" href="#line5">5</a>`)
+	assert.Contains(t, buf.String(), `/* LineLink */ .chroma .lnlinks { outline: none; text-decoration: none; color: inherit }`, buf.String())
 }
 
 func TestTableLineNumberSpacing(t *testing.T) {
@@ -185,7 +276,7 @@ func TestWithPreWrapper(t *testing.T) {
 			return fmt.Sprintf("<foo%s id=\"code-%t\">", styleAttr, code)
 		},
 		end: func(code bool) string {
-			return fmt.Sprintf("</foo>")
+			return "</foo>"
 		},
 	}
 
@@ -202,7 +293,7 @@ func TestWithPreWrapper(t *testing.T) {
 
 	t.Run("Regular", func(t *testing.T) {
 		s := format(New(WithClasses(true)))
-		assert.Equal(t, s, `<pre class="chroma"><span class="nb">echo</span> FOO</pre>`)
+		assert.Equal(t, s, `<pre class="chroma"><code><span class="line"><span class="cl"><span class="nb">echo</span> FOO</span></span></code></pre>`)
 	})
 
 	t.Run("PreventSurroundingPre", func(t *testing.T) {
@@ -210,9 +301,19 @@ func TestWithPreWrapper(t *testing.T) {
 		assert.Equal(t, s, `<span class="nb">echo</span> FOO`)
 	})
 
+	t.Run("InlineCode", func(t *testing.T) {
+		s := format(New(InlineCode(true), WithClasses(true)))
+		assert.Equal(t, s, `<code class="chroma"><span class="nb">echo</span> FOO</code>`)
+	})
+
+	t.Run("InlineCode, inline styles", func(t *testing.T) {
+		s := format(New(InlineCode(true)))
+		assert.True(t, regexp.MustCompile(`<code style=".+?"><span style=".+?">echo</span> FOO</code>`).MatchString(s))
+	})
+
 	t.Run("Wrapper", func(t *testing.T) {
 		s := format(New(WithPreWrapper(wrapper), WithClasses(true)))
-		assert.Equal(t, s, `<foo class="chroma" id="code-true"><span class="nb">echo</span> FOO</foo>`)
+		assert.Equal(t, s, `<foo class="chroma" id="code-true"><span class="line"><span class="cl"><span class="nb">echo</span> FOO</span></span></foo>`)
 	})
 
 	t.Run("Wrapper, LineNumbersInTable", func(t *testing.T) {
@@ -223,7 +324,7 @@ func TestWithPreWrapper(t *testing.T) {
 <foo class="chroma" id="code-false"><span class="lnt">1
 </span></foo></td>
 <td class="lntd">
-<foo class="chroma" id="code-true"><span class="nb">echo</span> FOO</foo></td></tr></table>
+<foo class="chroma" id="code-true"><span class="line"><span class="cl"><span class="nb">echo</span> FOO</span></span></foo></td></tr></table>
 </div>
 `)
 	})
@@ -246,16 +347,29 @@ func TestReconfigureOptions(t *testing.T) {
 	err = f.Format(&buf, styles.Fallback, it)
 
 	assert.NoError(t, err)
-	assert.Equal(t, `<pre class="chroma"><span class="nb">echo</span> FOO</pre>`, buf.String())
+	assert.Equal(t, `<pre class="chroma"><code><span class="line"><span class="cl"><span class="nb">echo</span> FOO</span></span></code></pre>`, buf.String())
 }
 
 func TestWriteCssWithAllClasses(t *testing.T) {
-	formatter := New()
-	formatter.allClasses = true
+	formatter := New(WithAllClasses(true))
 
 	var buf bytes.Buffer
 	err := formatter.WriteCSS(&buf, styles.Fallback)
 
 	assert.NoError(t, err)
 	assert.NotContains(t, buf.String(), ".chroma . {", "Generated css doesn't contain invalid css")
+}
+
+func TestStyleCache(t *testing.T) {
+	f := New()
+
+	assert.True(t, len(styles.Registry) > styleCacheLimit)
+
+	for _, style := range styles.Registry {
+		var buf bytes.Buffer
+		err := f.WriteCSS(&buf, style)
+		assert.NoError(t, err)
+	}
+
+	assert.Equal(t, styleCacheLimit, len(f.styleCache.cache))
 }

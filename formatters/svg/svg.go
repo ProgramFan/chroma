@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 	"path"
 	"strings"
 
-	"github.com/alecthomas/chroma"
+	"github.com/alecthomas/chroma/v2"
 )
 
 // Option sets an option of the SVG formatter.
@@ -34,7 +34,7 @@ func EmbedFontFile(fontFamily string, fileName string) (option Option, err error
 	}
 
 	var content []byte
-	if content, err = ioutil.ReadFile(fileName); err == nil {
+	if content, err = os.ReadFile(fileName); err == nil {
 		option = EmbedFont(fontFamily, base64.StdEncoding.EncodeToString(content), format)
 	}
 	return

@@ -3,7 +3,7 @@ package chroma
 import (
 	"testing"
 
-	"github.com/alecthomas/assert"
+	assert "github.com/alecthomas/assert/v2"
 )
 
 func TestTokenTypeClassifiers(t *testing.T) {
@@ -13,22 +13,18 @@ func TestTokenTypeClassifiers(t *testing.T) {
 }
 
 func TestSimpleLexer(t *testing.T) {
-	lexer, err := NewLexer( // nolint: forbidigo
-		&Config{
-			Name:      "INI",
-			Aliases:   []string{"ini", "cfg"},
-			Filenames: []string{"*.ini", "*.cfg"},
+	lexer := mustNewLexer(t, &Config{
+		Name:      "INI",
+		Aliases:   []string{"ini", "cfg"},
+		Filenames: []string{"*.ini", "*.cfg"},
+	}, map[string][]Rule{
+		"root": {
+			{`\s+`, Whitespace, nil},
+			{`;.*?$`, Comment, nil},
+			{`\[.*?\]$`, Keyword, nil},
+			{`(.*?)(\s*)(=)(\s*)(.*?)$`, ByGroups(Name, Whitespace, Operator, Whitespace, String), nil},
 		},
-		map[string][]Rule{
-			"root": {
-				{`\s+`, Whitespace, nil},
-				{`;.*?$`, Comment, nil},
-				{`\[.*?\]$`, Keyword, nil},
-				{`(.*?)(\s*)(=)(\s*)(.*?)$`, ByGroups(Name, Whitespace, Operator, Whitespace, String), nil},
-			},
-		},
-	)
-	assert.NoError(t, err)
+	})
 	actual, err := Tokenise(lexer, nil, `
 	; this is a comment
 	[section]

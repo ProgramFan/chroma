@@ -3,6 +3,7 @@ package chroma
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -18,126 +19,6 @@ type Rule struct {
 	Pattern string
 	Type    Emitter
 	Mutator Mutator
-}
-
-// An Emitter takes group matches and returns tokens.
-type Emitter interface {
-	// Emit tokens for the given regex groups.
-	Emit(groups []string, state *LexerState) Iterator
-}
-
-// EmitterFunc is a function that is an Emitter.
-type EmitterFunc func(groups []string, state *LexerState) Iterator
-
-// Emit tokens for groups.
-func (e EmitterFunc) Emit(groups []string, state *LexerState) Iterator {
-	return e(groups, state)
-}
-
-// ByGroups emits a token for each matching group in the rule's regex.
-func ByGroups(emitters ...Emitter) Emitter {
-	return EmitterFunc(func(groups []string, state *LexerState) Iterator {
-		iterators := make([]Iterator, 0, len(groups)-1)
-		if len(emitters) != len(groups)-1 {
-			iterators = append(iterators, Error.Emit(groups, state))
-			// panic(errors.Errorf("number of groups %q does not match number of emitters %v", groups, emitters))
-		} else {
-			for i, group := range groups[1:] {
-				iterators = append(iterators, emitters[i].Emit([]string{group}, state))
-			}
-		}
-		return Concaterator(iterators...)
-	})
-}
-
-// UsingByGroup emits tokens for the matched groups in the regex using a
-// "sublexer". Used when lexing code blocks where the name of a sublexer is
-// contained within the block, for example on a Markdown text block or SQL
-// language block.
-//
-// The sublexer will be retrieved using sublexerGetFunc (typically
-// internal.Get), using the captured value from the matched sublexerNameGroup.
-//
-// If sublexerGetFunc returns a non-nil lexer for the captured sublexerNameGroup,
-// then tokens for the matched codeGroup will be emitted using the retrieved
-// lexer. Otherwise, if the sublexer is nil, then tokens will be emitted from
-// the passed emitter.
-//
-// Example:
-//
-// 	var Markdown = internal.Register(MustNewLexer(
-// 		&Config{
-// 			Name:      "markdown",
-// 			Aliases:   []string{"md", "mkd"},
-// 			Filenames: []string{"*.md", "*.mkd", "*.markdown"},
-// 			MimeTypes: []string{"text/x-markdown"},
-// 		},
-// 		Rules{
-// 			"root": {
-// 				{"^(```)(\\w+)(\\n)([\\w\\W]*?)(^```$)",
-// 					UsingByGroup(
-// 						internal.Get,
-// 						2, 4,
-// 						String, String, String, Text, String,
-// 					),
-// 					nil,
-// 				},
-// 			},
-// 		},
-// 	))
-//
-// See the lexers/m/markdown.go for the complete example.
-//
-// Note: panic's if the number emitters does not equal the number of matched
-// groups in the regex.
-func UsingByGroup(sublexerGetFunc func(string) Lexer, sublexerNameGroup, codeGroup int, emitters ...Emitter) Emitter {
-	return EmitterFunc(func(groups []string, state *LexerState) Iterator {
-		// bounds check
-		if len(emitters) != len(groups)-1 {
-			panic("UsingByGroup expects number of emitters to be the same as len(groups)-1")
-		}
-
-		// grab sublexer
-		sublexer := sublexerGetFunc(groups[sublexerNameGroup])
-
-		// build iterators
-		iterators := make([]Iterator, len(groups)-1)
-		for i, group := range groups[1:] {
-			if i == codeGroup-1 && sublexer != nil {
-				var err error
-				iterators[i], err = sublexer.Tokenise(nil, groups[codeGroup])
-				if err != nil {
-					panic(err)
-				}
-			} else {
-				iterators[i] = emitters[i].Emit([]string{group}, state)
-			}
-		}
-
-		return Concaterator(iterators...)
-	})
-}
-
-// Using returns an Emitter that uses a given Lexer for parsing and emitting.
-func Using(lexer Lexer) Emitter {
-	return EmitterFunc(func(groups []string, _ *LexerState) Iterator {
-		it, err := lexer.Tokenise(&TokeniseOptions{State: "root", Nested: true}, groups[0])
-		if err != nil {
-			panic(err)
-		}
-		return it
-	})
-}
-
-// UsingSelf is like Using, but uses the current Lexer.
-func UsingSelf(stateName string) Emitter {
-	return EmitterFunc(func(groups []string, state *LexerState) Iterator {
-		it, err := state.Lexer.Tokenise(&TokeniseOptions{State: stateName, Nested: true}, groups[0])
-		if err != nil {
-			panic(err)
-		}
-		return it
-	})
 }
 
 // Words creates a regex that matches any of the given literal words.
@@ -194,31 +75,9 @@ func (r Rules) Merge(rules Rules) Rules {
 	return out
 }
 
-// MustNewLazyLexer creates a new Lexer with deferred rules generation or panics.
-func MustNewLazyLexer(config *Config, rulesFunc func() Rules) *RegexLexer {
-	lexer, err := NewLazyLexer(config, rulesFunc)
-	if err != nil {
-		panic(err)
-	}
-	return lexer
-}
-
-// NewLazyLexer creates a new regex-based Lexer with deferred rules generation.
-func NewLazyLexer(config *Config, rulesFunc func() Rules) (*RegexLexer, error) {
-	if config == nil {
-		config = &Config{}
-	}
-	return &RegexLexer{
-		config:       config,
-		compilerFunc: rulesFunc,
-	}, nil
-}
-
-// MustNewLexer creates a new Lexer or panics.
-//
-// Deprecated: Use MustNewLazyLexer instead.
-func MustNewLexer(config *Config, rules Rules) *RegexLexer { // nolint: forbidigo
-	lexer, err := NewLexer(config, rules) // nolint: forbidigo
+// MustNewLexer creates a new Lexer with deferred rules generation or panics.
+func MustNewLexer(config *Config, rules func() Rules) *RegexLexer {
+	lexer, err := NewLexer(config, rules)
 	if err != nil {
 		panic(err)
 	}
@@ -227,12 +86,52 @@ func MustNewLexer(config *Config, rules Rules) *RegexLexer { // nolint: forbidig
 
 // NewLexer creates a new regex-based Lexer.
 //
-// "rules" is a state machine transitition map. Each key is a state. Values are sets of rules
+// "rules" is a state machine transition map. Each key is a state. Values are sets of rules
 // that match input, optionally modify lexer state, and output tokens.
-//
-// Deprecated: Use NewLazyLexer instead.
-func NewLexer(config *Config, rules Rules) (*RegexLexer, error) { // nolint: forbidigo
-	return NewLazyLexer(config, func() Rules { return rules })
+func NewLexer(config *Config, rulesFunc func() Rules) (*RegexLexer, error) {
+	if config == nil {
+		config = &Config{}
+	}
+	for _, glob := range append(config.Filenames, config.AliasFilenames...) {
+		_, err := filepath.Match(glob, "")
+		if err != nil {
+			return nil, fmt.Errorf("%s: %q is not a valid glob: %w", config.Name, glob, err)
+		}
+	}
+	r := &RegexLexer{
+		config:         config,
+		fetchRulesFunc: func() (Rules, error) { return rulesFunc(), nil },
+	}
+	// One-off code to generate XML lexers in the Chroma source tree.
+	// var nameCleanRe = regexp.MustCompile(`[^-+A-Za-z0-9_]`)
+	// name := strings.ToLower(nameCleanRe.ReplaceAllString(config.Name, "_"))
+	// data, err := Marshal(r)
+	// if err != nil {
+	// 	if errors.Is(err, ErrNotSerialisable) {
+	// 		fmt.Fprintf(os.Stderr, "warning: %q: %s\n", name, err)
+	// 		return r, nil
+	// 	}
+	// 	return nil, err
+	// }
+	// _, file, _, ok := runtime.Caller(2)
+	// if !ok {
+	// 	panic("??")
+	// }
+	// fmt.Println(file)
+	// if strings.Contains(file, "/lexers/") {
+	// 	dir := filepath.Join(filepath.Dir(file), "embedded")
+	// 	err = os.MkdirAll(dir, 0700)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	filename := filepath.Join(dir, name) + ".xml"
+	// 	fmt.Println(filename)
+	// 	err = ioutil.WriteFile(filename, data, 0600)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// }
+	return r, nil
 }
 
 // Trace enables debug tracing.
@@ -255,13 +154,14 @@ type CompiledRules map[string][]*CompiledRule
 
 // LexerState contains the state for a single lex.
 type LexerState struct {
-	Lexer *RegexLexer
-	Text  []rune
-	Pos   int
-	Rules CompiledRules
-	Stack []string
-	State string
-	Rule  int
+	Lexer    *RegexLexer
+	Registry *LexerRegistry
+	Text     []rune
+	Pos      int
+	Rules    CompiledRules
+	Stack    []string
+	State    string
+	Rule     int
 	// Group matches.
 	Groups []string
 	// Named Group matches.
@@ -361,31 +261,59 @@ func (l *LexerState) Iterator() Token { // nolint: gocognit
 
 // RegexLexer is the default lexer implementation used in Chroma.
 type RegexLexer struct {
+	registry *LexerRegistry // The LexerRegistry this Lexer is associated with, if any.
 	config   *Config
 	analyser func(text string) float32
 	trace    bool
 
-	mu           sync.Mutex
-	compiled     bool
-	rules        map[string][]*CompiledRule
-	compilerFunc func() Rules
-	compileOnce  sync.Once
+	mu             sync.Mutex
+	compiled       bool
+	rawRules       Rules
+	rules          map[string][]*CompiledRule
+	fetchRulesFunc func() (Rules, error)
+	compileOnce    sync.Once
+}
+
+func (r *RegexLexer) String() string {
+	return r.config.Name
+}
+
+// Rules in the Lexer.
+func (r *RegexLexer) Rules() (Rules, error) {
+	if err := r.needRules(); err != nil {
+		return nil, err
+	}
+	return r.rawRules, nil
+}
+
+// SetRegistry the lexer will use to lookup other lexers if necessary.
+func (r *RegexLexer) SetRegistry(registry *LexerRegistry) Lexer {
+	r.registry = registry
+	return r
 }
 
 // SetAnalyser sets the analyser function used to perform content inspection.
-func (r *RegexLexer) SetAnalyser(analyser func(text string) float32) *RegexLexer {
+func (r *RegexLexer) SetAnalyser(analyser func(text string) float32) Lexer {
 	r.analyser = analyser
 	return r
 }
 
-func (r *RegexLexer) AnalyseText(text string) float32 { // nolint
+// AnalyseText scores how likely a fragment of text is to match this lexer, between 0.0 and 1.0.
+func (r *RegexLexer) AnalyseText(text string) float32 {
 	if r.analyser != nil {
 		return r.analyser(text)
 	}
-	return 0.0
+	return 0
 }
 
-func (r *RegexLexer) Config() *Config { // nolint
+// SetConfig replaces the Config for this Lexer.
+func (r *RegexLexer) SetConfig(config *Config) *RegexLexer {
+	r.config = config
+	return r
+}
+
+// Config returns the Config for this Lexer.
+func (r *RegexLexer) Config() *Config {
 	return r.config
 }
 
@@ -404,7 +332,7 @@ func (r *RegexLexer) maybeCompile() (err error) {
 					pattern = "(?" + rule.flags + ")" + pattern
 				}
 				pattern = `\G` + pattern
-				rule.Regexp, err = regexp2.Compile(pattern, regexp2.RE2)
+				rule.Regexp, err = regexp2.Compile(pattern, 0)
 				if err != nil {
 					return fmt.Errorf("failed to compile rule %s.%d: %s", state, i, err)
 				}
@@ -436,8 +364,11 @@ restart:
 	return nil
 }
 
-func (r *RegexLexer) compileRules() error {
-	rules := r.compilerFunc()
+func (r *RegexLexer) fetchRules() error {
+	rules, err := r.fetchRulesFunc()
+	if err != nil {
+		return fmt.Errorf("%s: failed to compile rules: %w", r.config.Name, err)
+	}
 	if _, ok := rules["root"]; !ok {
 		return fmt.Errorf("no \"root\" state")
 	}
@@ -459,21 +390,28 @@ func (r *RegexLexer) compileRules() error {
 		}
 	}
 
+	r.rawRules = rules
 	r.rules = compiledRules
 	return nil
 }
 
-func (r *RegexLexer) Tokenise(options *TokeniseOptions, text string) (Iterator, error) { // nolint
+func (r *RegexLexer) needRules() error {
 	var err error
-	if r.compilerFunc != nil {
+	if r.fetchRulesFunc != nil {
 		r.compileOnce.Do(func() {
-			err = r.compileRules()
+			err = r.fetchRules()
 		})
 	}
-	if err != nil {
-		return nil, err
-	}
 	if err := r.maybeCompile(); err != nil {
+		return err
+	}
+	return err
+}
+
+// Tokenise text using lexer, returning an iterator.
+func (r *RegexLexer) Tokenise(options *TokeniseOptions, text string) (Iterator, error) {
+	err := r.needRules()
+	if err != nil {
 		return nil, err
 	}
 	if options == nil {
@@ -488,6 +426,7 @@ func (r *RegexLexer) Tokenise(options *TokeniseOptions, text string) (Iterator, 
 		newlineAdded = true
 	}
 	state := &LexerState{
+		Registry:       r.registry,
 		newlineAdded:   newlineAdded,
 		options:        options,
 		Lexer:          r,
@@ -497,6 +436,15 @@ func (r *RegexLexer) Tokenise(options *TokeniseOptions, text string) (Iterator, 
 		MutatorContext: map[interface{}]interface{}{},
 	}
 	return state.Iterator, nil
+}
+
+// MustRules is like Rules() but will panic on error.
+func (r *RegexLexer) MustRules() Rules {
+	rules, err := r.Rules()
+	if err != nil {
+		panic(err)
+	}
+	return rules
 }
 
 func matchRules(text []rune, pos int, rules []*CompiledRule) (int, *CompiledRule, []string, map[string]string) {

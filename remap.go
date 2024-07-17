@@ -10,6 +10,20 @@ func RemappingLexer(lexer Lexer, mapper func(Token) []Token) Lexer {
 	return &remappingLexer{lexer, mapper}
 }
 
+func (r *remappingLexer) AnalyseText(text string) float32 {
+	return r.lexer.AnalyseText(text)
+}
+
+func (r *remappingLexer) SetAnalyser(analyser func(text string) float32) Lexer {
+	r.lexer.SetAnalyser(analyser)
+	return r
+}
+
+func (r *remappingLexer) SetRegistry(registry *LexerRegistry) Lexer {
+	r.lexer.SetRegistry(registry)
+	return r
+}
+
 func (r *remappingLexer) Config() *Config {
 	return r.lexer.Config()
 }
@@ -46,10 +60,10 @@ type TypeMapping []struct {
 //
 // eg. Map "defvaralias" tokens of type NameVariable to NameFunction:
 //
-// 		mapping := TypeMapping{
-// 			{NameVariable, NameFunction, []string{"defvaralias"},
-// 		}
-// 		lexer = TypeRemappingLexer(lexer, mapping)
+//	mapping := TypeMapping{
+//		{NameVariable, NameFunction, []string{"defvaralias"},
+//	}
+//	lexer = TypeRemappingLexer(lexer, mapping)
 func TypeRemappingLexer(lexer Lexer, mapping TypeMapping) Lexer {
 	// Lookup table for fast remapping.
 	lut := map[TokenType]map[string]TokenType{}

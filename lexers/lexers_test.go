@@ -1,42 +1,62 @@
 package lexers_test
 
 import (
-	"encoding/json"
-	"io/ioutil"
+	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/alecthomas/assert"
-	"github.com/alecthomas/chroma"
-	"github.com/alecthomas/chroma/formatters"
-	"github.com/alecthomas/chroma/lexers"
-	"github.com/alecthomas/chroma/lexers/a"
-	"github.com/alecthomas/chroma/lexers/x"
-	"github.com/alecthomas/chroma/styles"
+	"github.com/alecthomas/assert/v2"
+	"github.com/alecthomas/repr"
+
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 )
 
 func TestCompileAllRegexes(t *testing.T) {
-	for _, lexer := range lexers.Registry.Lexers {
+	for _, lexer := range lexers.GlobalLexerRegistry.Lexers {
 		it, err := lexer.Tokenise(nil, "")
 		assert.NoError(t, err, "%s failed", lexer.Config().Name)
-		err = formatters.NoOp.Format(ioutil.Discard, styles.SwapOff, it)
+		err = formatters.NoOp.Format(io.Discard, styles.SwapOff, it)
 		assert.NoError(t, err, "%s failed", lexer.Config().Name)
 	}
 }
 
 func TestGet(t *testing.T) {
 	t.Run("ByName", func(t *testing.T) {
-		assert.Equal(t, lexers.Get("xml"), x.XML)
+		assert.True(t, lexers.Get("xml") == lexers.GlobalLexerRegistry.Get("XML"))
 	})
 	t.Run("ByAlias", func(t *testing.T) {
-		assert.Equal(t, lexers.Get("as"), a.Actionscript)
+		assert.True(t, lexers.Get("as") == lexers.GlobalLexerRegistry.Get("Actionscript"))
 	})
 	t.Run("ViaFilename", func(t *testing.T) {
-		assert.Equal(t, lexers.Get("svg"), x.XML)
+		expected := lexers.Get("XML")
+		actual := lexers.GlobalLexerRegistry.Get("test.svg")
+		assert.Equal(t,
+			repr.String(expected.Config(), repr.Indent("  ")),
+			repr.String(actual.Config(), repr.Indent("  ")))
 	})
+}
+
+func TestGlobs(t *testing.T) {
+	filename := "main.go"
+	for _, lexer := range lexers.GlobalLexerRegistry.Lexers {
+		config := lexer.Config()
+		for _, glob := range config.Filenames {
+			_, err := filepath.Match(glob, filename)
+			assert.NoError(t, err)
+		}
+		for _, glob := range config.AliasFilenames {
+			_, err := filepath.Match(glob, filename)
+			assert.NoError(t, err)
+		}
+	}
 }
 
 func BenchmarkGet(b *testing.B) {
@@ -45,38 +65,49 @@ func BenchmarkGet(b *testing.B) {
 	}
 }
 
-func FileTest(t *testing.T, lexer chroma.Lexer, actualFilename, expectedFilename string) {
+func FileTest(t *testing.T, lexer chroma.Lexer, sourceFile, expectedFilename string) {
 	t.Helper()
-	t.Run(lexer.Config().Name+"/"+actualFilename, func(t *testing.T) {
+	t.Run(lexer.Config().Name+"/"+sourceFile, func(t *testing.T) {
 		// Read and tokenise source text.
-		actualText, err := ioutil.ReadFile(actualFilename)
+		sourceBytes, err := os.ReadFile(sourceFile)
 		assert.NoError(t, err)
-		actual, err := chroma.Tokenise(lexer, nil, string(actualText))
+		actualTokens, err := chroma.Tokenise(lexer, nil, string(sourceBytes))
 		assert.NoError(t, err)
 
-		if os.Getenv("RECORD") == "true" {
-			// Update the expected file with the generated output of this lexer
-			f, err := os.Create(expectedFilename)
-			defer f.Close() // nolint: gosec
-			assert.NoError(t, err)
-			assert.NoError(t, formatters.JSON.Format(f, nil, chroma.Literator(actual...)))
-		} else {
-			// Read expected JSON into token slice.
-			var expected []chroma.Token
-			r, err := os.Open(expectedFilename)
-			assert.NoError(t, err)
-			err = json.NewDecoder(r).Decode(&expected)
-			assert.NoError(t, err)
+		// Check for error tokens early
+		for _, token := range actualTokens {
+			if token.Type == chroma.Error {
+				t.Logf("Found Error token in lexer %s output: %s", lexer.Config().Name, repr.String(token))
+			}
+		}
 
-			// Equal?
-			assert.Equal(t, expected, actual)
+		// Use a bytes.Buffer to "render" the actual bytes
+		var actualBytes bytes.Buffer
+		err = formatters.JSON.Format(&actualBytes, nil, chroma.Literator(actualTokens...))
+		assert.NoError(t, err)
+
+		expectedBytes, err := os.ReadFile(expectedFilename)
+		assert.NoError(t, err)
+
+		// Check that the expected bytes are identical
+		if !bytes.Equal(actualBytes.Bytes(), expectedBytes) {
+			if os.Getenv("RECORD") == "true" {
+				f, err := os.Create(expectedFilename)
+				assert.NoError(t, err)
+				_, err = f.Write(actualBytes.Bytes())
+				assert.NoError(t, err)
+				assert.NoError(t, f.Close())
+			} else {
+				// fail via an assertion of string values for diff output
+				assert.Equal(t, string(expectedBytes), actualBytes.String())
+			}
 		}
 	})
 }
 
 // Test source files are in the form <key>.<key> and validation data is in the form <key>.<key>.expected.
 func TestLexers(t *testing.T) {
-	files, err := ioutil.ReadDir("testdata")
+	files, err := os.ReadDir("testdata")
 	assert.NoError(t, err)
 
 	for _, file := range files {
@@ -88,9 +119,9 @@ func TestLexers(t *testing.T) {
 		if file.IsDir() {
 			dirname := filepath.Join("testdata", file.Name())
 			lexer := lexers.Get(file.Name())
-			assert.NotNil(t, lexer)
+			assert.NotZero(t, lexer)
 
-			subFiles, err := ioutil.ReadDir(dirname)
+			subFiles, err := os.ReadDir(dirname)
 			assert.NoError(t, err)
 
 			for _, subFile := range subFiles {
@@ -113,7 +144,7 @@ func TestLexers(t *testing.T) {
 
 			base := strings.Split(strings.TrimSuffix(file.Name(), filepath.Ext(file.Name())), ".")[0]
 			lexer := lexers.Get(base)
-			assert.NotNil(t, lexer)
+			assert.NotZero(t, lexer, base)
 
 			filename := filepath.Join("testdata", file.Name())
 			expectedFilename := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".expected"
@@ -127,30 +158,29 @@ func TestLexers(t *testing.T) {
 func FileTestAnalysis(t *testing.T, lexer chroma.Lexer, actualFilepath, expectedFilepath string) {
 	t.Helper()
 	t.Run(lexer.Config().Name+"/"+actualFilepath, func(t *testing.T) {
-		expectedData, err := ioutil.ReadFile(expectedFilepath)
+		expectedData, err := os.ReadFile(expectedFilepath)
 		assert.NoError(t, err)
 
 		analyser, ok := lexer.(chroma.Analyser)
 		assert.True(t, ok, "lexer %q does not set analyser", lexer.Config().Name)
 
-		data, err := ioutil.ReadFile(actualFilepath)
+		data, err := os.ReadFile(actualFilepath)
 		assert.NoError(t, err)
 
 		actual := analyser.AnalyseText(string(data))
+		var actualData bytes.Buffer
+		fmt.Fprintf(&actualData, "%s\n", strconv.FormatFloat(float64(actual), 'f', -1, 32))
 
-		if os.Getenv("RECORD") == "true" {
-			// Update the expected file with the generated output of this lexer
-			f, err := os.Create(expectedFilepath)
-			defer f.Close() // nolint: gosec
-			assert.NoError(t, err)
-
-			_, err = f.WriteString(strconv.FormatFloat(float64(actual), 'f', -1, 32))
-			assert.NoError(t, err)
-		} else {
-			expected, err := strconv.ParseFloat(strings.TrimSpace(string(expectedData)), 32)
-			assert.NoError(t, err)
-
-			assert.Equal(t, float32(expected), actual)
+		if !bytes.Equal(expectedData, actualData.Bytes()) {
+			if os.Getenv("RECORD") == "true" {
+				f, err := os.Create(expectedFilepath)
+				assert.NoError(t, err)
+				_, err = f.Write(actualData.Bytes())
+				assert.NoError(t, err)
+				assert.NoError(t, f.Close())
+			} else {
+				assert.Equal(t, string(expectedData), actualData.String())
+			}
 		}
 	})
 }
@@ -165,7 +195,7 @@ func TestLexersTextAnalyser(t *testing.T) {
 		lexerName := strings.Split(baseFilename, ".")[0]
 
 		lexer := lexers.Get(lexerName)
-		assert.NotNil(t, lexer, "no lexer found for name %q", lexerName)
+		assert.NotZero(t, lexer, "no lexer found for name %q", lexerName)
 
 		expectedFilepath := "testdata/analysis/" + baseFilename + ".expected"
 

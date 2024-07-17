@@ -3,11 +3,11 @@ package chroma
 import (
 	"testing"
 
-	"github.com/alecthomas/assert"
+	assert "github.com/alecthomas/assert/v2"
 )
 
 func TestCoalesce(t *testing.T) {
-	lexer := Coalesce(MustNewLexer(nil, Rules{ // nolint: forbidigo
+	lexer := Coalesce(mustNewLexer(t, nil, Rules{ // nolint: forbidigo
 		"root": []Rule{
 			{`[!@#$%^&*()]`, Punctuation, nil},
 		},
